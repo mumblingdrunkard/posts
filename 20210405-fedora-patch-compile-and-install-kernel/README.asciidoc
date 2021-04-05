@@ -1,0 +1,258 @@
+= Custom kernel on Fedora 34 (beta): Patching, compiling, and installing
+:source-highlighter: highlight.js
+:source-language: shell
+:imagesdir: img
+mumblingdrunkard <mumblingdrunkard@protonmail.com>
+2021 Apr 05
+
+[IMPORTANT]
+====
+
+image::cc-by.png[cc-by,230,80]
+
+This work is licensed under a Creative Commons Attribution 4.0 International 
+License. https://creativecommons.org/licenses/by/4.0/
+
+The document is largely based on two sources:
+
+* https://fedoraproject.org/wiki/Building_a_custom_kernel
+* https://forum.level1techs.com/t/compile-fedora-kernel-the-fedora-way/149242
+====
+
+NOTE: Some if not most of the commands we will be running will require
+super-user access. You should supply `sudo` only when you get errors about
+permissions.
+
+== Why?
+
+In my case, I have a Lenovo Yoga C940-14IIL that I like to run linux on. Most
+everything works except for the fingerprint-reader, which is nbd., and
+hotplugging on the thunderbolt ports, which is a big deal because I have a TB3
+dock that I like to use.
+
+I write this guide for future me because I found the documentation online to be
+lacking and incomplete. Here I'd like to provide a more complete guide.
+
+There's more than one way to skin a penguin. I'll compile the kernel with the
+help of fedpkg, creating installable rpm's, but you're free to do it any other
+way you like to.
+
+== Getting ready
+
+Here we will grab some, but not all the dependencies we're gonna need.
+
+[source]
+dnf install fedpkg fedora-packager rpmdevtools ncurses-devel pesign grubby
+
+Then we will get set up by running fedpkg to fetch some configuration files and
+other stuff. We will probably want to navigate to a suitable directory first.
+
+[source]
+fedpkg clone -a kernel
+
+The `-a`-flag is applied to clone it anonymously because you most likely do not
+have a fedora developer account. No worries. This can take some time depending
+on the speed of our internet. Personally I had some annoying issues, but in the
+case that your download cuts out, just `rm -rf` the folder and try again.
+
+After successfully cloning the repository we will navigate to the correct branch
+and create our own branch that we can work on.
+
+[source]
+----
+cd kernel                        # Navigate to cloned dir
+git checkout origin/f34          # Choose our branch
+git checkout -b my-custom-kernel # Create new branch to apply changes to
+git branch -u origin/f34         # Add the upstream branch
+----
+
+We will run the below command to fetch the rest of the dependencies.
+
+[source]
+dnf builddep kernel.spec
+
+After doing this we should not need to install any more packages, but ymv..
+One of the sources for this article also suggested we run
+
+[source]
+----
+dnf install elfutils-devel gcc-plugin-devel perl-devel perl-generators \
+            python3-devel
+----
+
+According to this guide: https://fedoraproject.org/wiki/Building_a_custom_kernel
+we also have to add our current user to `/etc/pesign/users`. We can print
+our username with `echo $USER`.
+
+[source]
+vim /etc/pesign/users # Or whatever editor you are comfortable with
+
+After modifying my file it looks like this:
+
+....
+pesign
+mumblingdrunkard
+....
+
+Then run
+
+[source]
+/usr/libexec/pesign/pesign-authorize
+
+to authorize the user. I am not sure if this is needed, but I did it anyway.
+
+To differentiate our kernel from a stock kernel and avoid conflicts, we can
+(read: should) edit the `kernel.spec` file and uncomment
+
+....
+# define buildid .local
+....
+
+so that it looks like
+
+....
+%define buildid .local
+....
+
+We can change `.local` to most whatever we'd like. I chose to make it
+`.tb3-fix`. Just make it something sensible.
+
+=== If we are on a very fresh branch (rawhide)
+
+If we are on the bleeding edge, we may have chosen a branch of the kernel that
+is set to compile as debug for all kernels. We can disable this by locating
+
+....
+%define debugbuildsenabled 0
+....
+
+and changing it to `1` in +kernel.spec+. This should create separate debug
+kernels instead of making all kernels debug. For me, using the `origin/f34`
+branch, it was already set to 1.
+
+=== If we do not want the standard config
+
+I was unable to get `make menuconfig` working, but we can at least get a
+base to work upon by running
+
+[source]
+cp kernel-x86_64-fedora.config kernel-local # I am on x86_64
+
+and then changing the `kernel-local` file to our liking. I did not do this and
+once again, your mileage may vary.
+
+=== Commit the changes with a sensible message
+
+[source]
+----
+git stage kernel.spec
+# git stage kernel-local # uncomment if we changed config
+git commit -m "Modified kernel.spec"
+----
+
+== Patching
+
+First we will grab a `.patch` file that we want to apply to the kernel. For me,
+that is patch 287661 from
+https://bugzilla.kernel.org/attachment.cgi?id=287661&action=diff which will fix
+my thunderbolt issue. We can download the file by clicking `View` and saving
+the file. How we acquire the patches will vary.
+
+Once we have our `.patch` file downloaded, we will copy/move it to the
+directory with the rest of our files. I'll move it and rename it in the process.
+
+[source]
+----
+mv ~/Downloads/0001-x86-resource-Do-not-exclude-regions-that-are-marked-.patch \
+   ~/repos/kernel/287661.patch
+----
+
+=== Applying the patch
+
+To apply the patch we have to add 2 lines to our `kernel.spec`. We will edit the
+file in our favourite editor and first locate the line
+
+....
+# END OF PATCH DEFINITIONS
+....
+
+above which, we will add
+
+....
+Patch9999: 287661.patch
+....
+
+This is at least what most guides told me to do, but didn't work. Instead we
+also have to locate the line 
+
+....
+# END OF PATCH APPLICATIONS
+....
+
+then add the line
+
+....
+ApplyOptionalPatch 287661.patch
+....
+
+above it. After all of this the file should resemble the example below.
+
+.`kernel.spec` result
+....
+...
+
+Patch9999: 287661.patch
+# END OF PATCH DEFINITIONS
+
+...
+
+ApplyOptionalPatch 287661.patch
+# END OF PATCH APPLICATIONS
+
+...
+....
+
+We do this for every patch we want. In my case it is only one patch.
+
+=== Commit our changes
+
+Finally before compiling we will commit our changes to the repo.
+
+[source]
+----
+git add 287661.patch
+git stage kernel.spec
+git commit -m "Added patches"
+----
+
+== Compiling
+
+At this point, compiling should be as simple as running the below command.
+
+[source]
+fedpkg local
+
+This step can take a while. On my laptop it took around 2 hours. I recommend you
+walk away and do something else for a while.
+
+== Installing
+
+Once the compilation is complete, we navigate to the finished rpm packages and
+install them onto our system.
+
+[source]
+----
+cd x86_64 # I am on x86_64 so this is where my packages ended up
+rpm -ivh kernel-core-5.11.11-300.tb3-fix.fc34.x86_64.rpm             \
+         kernel-modules-5.11.11-300.tb3-fix.fc34.x86_64.rpm          \
+         kernel-modules-extra-5.11.11-300.tb3-fix.fc34.x86_64.rpm    \
+         kernel-modules-internal-5.11.11-300.tb3-fix.fc34.x86_64.rpm \
+         kernel-5.11.11-300.tb3-fix.fc34.x86_64.rpm
+----
+
+The naming of the above 5 packages will vary depending on the version of the
+kernel and the `buildid` that was set earlier. It should be relatively easy to
+figure out the right packages.
+
+Now all we have to do is restart so we can use our new kernel. If you have any
+questions, you can mail them to mumblingdrunkard@pm.me.
